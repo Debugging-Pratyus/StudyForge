@@ -15,7 +15,6 @@ type TaskRecord = { id: number; title: string; subject: string; planned_minutes:
 type FocusSessionRecord = { id: number; duration_minutes: number; completed_at: string };
 type Note = { id: string; title: string; content: string; createdAt: string; updatedAt: string };
 type NoteRecord = { id: number; title: string; content: string; created_at: string; updated_at: string };
-type LegacyNote = { title?: string; content?: string; body?: string; createdAt?: string; updatedAt?: string };
 
 const STORAGE_KEY = "studyforge-v2";
 const migrationKey = (userId: string, table: "tasks" | "focus_sessions") => `studyforge-v33a:${userId}:${table}`;
