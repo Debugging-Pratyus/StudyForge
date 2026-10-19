@@ -45,6 +45,7 @@ function TaskRow({ task, onToggle, onDelete }: { task: Task; onToggle: () => voi
 export default function Home() {
   const [isSavingPlanner, setIsSavingPlanner] = useState(false); const [plannerSaveStatus, setPlannerSaveStatus] = useState("");
   const router = useRouter(); const [view, setView] = useState<View>("Overview"); const [tasks, setTasks] = useState<Task[]>([]); const [sessions, setSessions] = useState<FocusSession[]>([]); const [planner, setPlanner] = useState<PlannerData>({}); const [name, setName] = useState("Student"); const [theme, setTheme] = useState<"light" | "warm">("light"); const [notes, setNotes] = useState<Note[]>([]); const [selectedNote, setSelectedNote] = useState<string | null>(null); const [noteTitle, setNoteTitle] = useState(""); const [noteContent, setNoteContent] = useState(""); const [selectedDay, setSelectedDay] = useState(todayKey()); const [timer, setTimer] = useState(25 * 60); const [timerRunning, setTimerRunning] = useState(false); const [hydrated, setHydrated] = useState(false); const [authChecked, setAuthChecked] = useState(false); const [activityLoaded, setActivityLoaded] = useState(false); const [userDataLoaded, setUserDataLoaded] = useState(false); const [migrationComplete, setMigrationComplete] = useState(false); const [profileMigrated, setProfileMigrated] = useState(false); const [plannerMigrated, setPlannerMigrated] = useState(false); const [notesMigrated, setNotesMigrated] = useState(false); const [isSavingProfile, setIsSavingProfile] = useState(false); const [userId, setUserId] = useState(""); const [userEmail, setUserEmail] = useState(""); const [isSigningOut, setIsSigningOut] = useState(false); const [authError, setAuthError] = useState(""); const hasHydrated = useRef(false);
+  const isSavingSession = useRef(false);
   useEffect(() => { let cancelled = false; async function loadAuthenticatedActivity() { try { const { data: authData, error: authLookupError } = await supabase.auth.getUser(); if (cancelled) return; if (authLookupError || !authData.user) { router.replace("/auth"); return; } const currentUser = authData.user; setUserId(currentUser.id); setUserEmail(currentUser.email ?? ""); let migrationError = ""; const legacy = readLegacyActivity(); try { for (const table of ["tasks", "focus_sessions"] as const) { const marker = migrationKey(currentUser.id, table); if (localStorage.getItem(marker) === "true") continue; const values = table === "tasks" ? legacy.tasks : legacy.sessions; if (values.length) { const rows = table === "tasks" ? legacy.tasks.map((task) => ({ user_id: currentUser.id, title: task.title, subject: task.subject, planned_minutes: task.plannedMinutes, due_date: task.date, completed: task.completed, completed_at: task.completedAt ?? null })) : legacy.sessions.map((session) => ({ user_id: currentUser.id, duration_minutes: session.durationMinutes, completed_at: session.completedAt })); const { error } = await supabase.from(table).insert(rows as never); if (error) throw new Error(`Could not import saved ${table === "tasks" ? "tasks" : "focus sessions"}: ${error.message}`); } localStorage.setItem(marker, "true"); } if (!cancelled) setMigrationComplete(true); } catch (error) { migrationError = error instanceof Error ? error.message : "Could not import saved activity."; } const [taskResult, sessionResult] = await Promise.all([supabase.from("tasks").select("id,title,subject,planned_minutes,due_date,completed,completed_at").eq("user_id", currentUser.id).order("created_at", { ascending: true }), supabase.from("focus_sessions").select("id,duration_minutes,completed_at").eq("user_id", currentUser.id).order("completed_at", { ascending: true })]); if (cancelled) return; const failures = [migrationError, taskResult.error ? `Could not load tasks: ${taskResult.error.message}` : "", sessionResult.error ? `Could not load focus sessions: ${sessionResult.error.message}` : ""].filter(Boolean); setAuthError(failures.join(" ")); setTasks(taskResult.error ? [] : (taskResult.data as TaskRecord[]).map(mapTaskRecord)); setSessions(sessionResult.error ? [] : (sessionResult.data as FocusSessionRecord[]).map(mapFocusSessionRecord)); setActivityLoaded(true); setAuthChecked(true); } catch (error) { if (!cancelled) { setAuthError(error instanceof Error ? error.message : "Unable to verify your session."); router.replace("/auth"); } } } void loadAuthenticatedActivity(); return () => { cancelled = true; }; }, [router]);
   useEffect(() => { const restore = window.setTimeout(() => { const data = safeStoredData(); setPlanner(data.planner); setName(data.name); setTheme(data.theme); const savedTimer = localStorage.getItem("studyforge-timer"); if (savedTimer) { try { const parsed = JSON.parse(savedTimer) as { seconds: number; savedAt: number; running: boolean }; const elapsed = parsed.running ? Math.floor((Date.now() - parsed.savedAt) / 1000) : 0; setTimer(Math.max(0, parsed.seconds - elapsed)); setTimerRunning(parsed.running && parsed.seconds > elapsed); } catch { /* use defaults */ } } hasHydrated.current = true; setHydrated(true); }, 0); return () => window.clearTimeout(restore); }, []);
   useEffect(() => { if (!authChecked || !hydrated || !userId) return; let cancelled = false; void loadUserData(userId, safeStoredData()).then((data) => { if (cancelled) return; setName(data.name); setTheme(data.theme); setPlanner(data.planner); setNotes(data.notes); setProfileMigrated(data.profileMigrated); setPlannerMigrated(data.plannerMigrated); setNotesMigrated(data.notesMigrated); setAuthError(data.errors.join(" ")); setUserDataLoaded(true); }).catch((error: unknown) => { if (!cancelled) { setAuthError(error instanceof Error ? error.message : "Could not load your account data."); setUserDataLoaded(true); } }); return () => { cancelled = true; }; }, [authChecked, hydrated, userId]);
@@ -64,10 +65,68 @@ export default function Home() {
     const selectedTasks = tasks.filter((task) => task.date === selectedDay);
     const timeLabel = `${String(Math.floor(timer / 60)).padStart(2, "0")}:${String(timer % 60).padStart(2, "0")}`;
     const dateLabel = new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(new Date());
-    async function addTask(input: Omit<Task, "id" | "completed" | "color">): Promise<boolean> { setAuthError(""); const { data, error } = await supabase.from("tasks").insert({ user_id: userId, title: input.title, subject: input.subject, planned_minutes: input.plannedMinutes, due_date: input.date, completed: false, completed_at: null }).select("id,title,subject,planned_minutes,due_date,completed,completed_at").single(); if (error) { setAuthError(`Could not add task: ${error.message}`); return false; } setTasks((current) => [...current, mapTaskRecord(data as TaskRecord, current.length)]); return true; }
-    async function toggleTask(id: string) { const task = tasks.find((item) => item.id === id); if (!task) return; const completed = !task.completed; const completedAt = completed ? new Date().toISOString() : null; setAuthError(""); const { data, error } = await supabase.from("tasks").update({ completed, completed_at: completedAt }).eq("id", id).eq("user_id", userId).select("id,title,subject,planned_minutes,due_date,completed,completed_at").single(); if (error) { setAuthError(`Could not update task: ${error.message}`); return; } setTasks((current) => current.map((item, index) => item.id === id ? mapTaskRecord(data as TaskRecord, index) : item)); }
-    async function deleteTask(id: string) { setAuthError(""); const { data, error } = await supabase.from("tasks").delete().eq("id", id).eq("user_id", userId).select("id").maybeSingle(); if (error) { setAuthError(`Could not delete task: ${error.message}`); return; } if (!data) { setAuthError("Could not delete task because it was not found."); return; } setTasks((current) => current.filter((task) => task.id !== id)); }
-    async function completeSession() { setTimer(25 * 60); setTimerRunning(false); setAuthError(""); const completedAt = new Date().toISOString(); const { data, error } = await supabase.from("focus_sessions").insert({ user_id: userId, duration_minutes: 25, completed_at: completedAt }).select("id,duration_minutes,completed_at").single(); if (error) { setAuthError(`Could not save focus session: ${error.message}`); return; } setSessions((current) => [...current, mapFocusSessionRecord(data as FocusSessionRecord)]); }
+    async function addTask(input: Omit<Task, "id" | "completed" | "color">): Promise<boolean> {
+      setAuthError("");
+      if (!userId) { setAuthError("Could not add task: no authenticated user."); return false; }
+      try {
+        const { data, error } = await supabase.from("tasks").insert({ user_id: userId, title: input.title, subject: input.subject, planned_minutes: input.plannedMinutes, due_date: input.date, completed: false, completed_at: null }).select("id,title,subject,planned_minutes,due_date,completed,completed_at").single();
+        if (error) throw error;
+        setTasks((current) => [...current, mapTaskRecord(data as TaskRecord, current.length)]);
+        return true;
+      } catch (error) {
+        setAuthError(`Could not add task: ${error instanceof Error ? error.message : "Please try again."}`);
+        return false;
+      }
+    }
+    async function toggleTask(id: string) {
+      const task = tasks.find((item) => item.id === id);
+      if (!task) return;
+      const completed = !task.completed;
+      const completedAt = completed ? new Date().toISOString() : null;
+      setAuthError("");
+      if (!userId) { setAuthError("Could not update task: no authenticated user."); return; }
+      try {
+        const { data, error } = await supabase.from("tasks").update({ completed, completed_at: completedAt }).eq("id", id).eq("user_id", userId).select("id,title,subject,planned_minutes,due_date,completed,completed_at").single();
+        if (error) throw error;
+        setTasks((current) => current.map((item, index) => item.id === id ? mapTaskRecord(data as TaskRecord, index) : item));
+      } catch (error) {
+        setAuthError(`Could not update task: ${error instanceof Error ? error.message : "Please try again."}`);
+      }
+    }
+    async function deleteTask(id: string) {
+      setAuthError("");
+      if (!userId) { setAuthError("Could not delete task: no authenticated user."); return; }
+      try {
+        const { data, error } = await supabase.from("tasks").delete().eq("id", id).eq("user_id", userId).select("id").maybeSingle();
+        if (error) throw error;
+        if (!data) { setAuthError("Could not delete task because it was not found."); return; }
+        setTasks((current) => current.filter((task) => task.id !== id));
+      } catch (error) {
+        setAuthError(`Could not delete task: ${error instanceof Error ? error.message : "Please try again."}`);
+      }
+    }
+    async function completeSession() {
+      if (isSavingSession.current) return;
+      isSavingSession.current = true;
+      setTimerRunning(false);
+      setAuthError("");
+      if (!userId) {
+        setAuthError("Could not save focus session: no authenticated user.");
+        isSavingSession.current = false;
+        return;
+      }
+      try {
+        const completedAt = new Date().toISOString();
+        const { data, error } = await supabase.from("focus_sessions").insert({ user_id: userId, duration_minutes: 25, completed_at: completedAt }).select("id,duration_minutes,completed_at").single();
+        if (error) throw error;
+        setSessions((current) => [...current, mapFocusSessionRecord(data as FocusSessionRecord)]);
+        setTimer(25 * 60);
+      } catch (error) {
+        setAuthError(`Could not save focus session: ${error instanceof Error ? error.message : "Please try again."}`);
+      } finally {
+        isSavingSession.current = false;
+      }
+    }
     const advanceTimer = useEffectEvent(() => { if (timer <= 1) { void completeSession(); return; } setTimer(timer - 1); });
     useEffect(() => { if (!timerRunning) return; const interval = window.setInterval(advanceTimer, 1000); return () => window.clearInterval(interval); }, [timerRunning]);
     async function saveProfile(nextName: string, nextTheme: "light" | "warm") { setIsSavingProfile(true); setAuthError(""); const displayName = nextName.trim() || "Student"; const { error } = await supabase.from("profiles").upsert({ id: userId, display_name: displayName, theme: nextTheme }, { onConflict: "id" }); if (error) setAuthError(`Could not save profile: ${error.message}`); else { setName(displayName); setTheme(nextTheme); setProfileMigrated(true); localStorage.setItem(userDataMigrationKey(userId, "profile"), "true"); } setIsSavingProfile(false); }
